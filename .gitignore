@@ -44,3 +44,6 @@ personal_TASK.md
 easytrain.sh
 nohup.out
 output/
+
+infer/
+ckpt/

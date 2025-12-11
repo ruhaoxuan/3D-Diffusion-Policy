@@ -7,6 +7,8 @@ if __name__ == "__main__":
     sys.path.append(ROOT_DIR)
     os.chdir(ROOT_DIR)
 
+import json
+
 import os
 import hydra
 import torch
@@ -189,6 +191,18 @@ class TrainDP3Workspace:
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                     if train_sampling_batch is None:
                         train_sampling_batch = batch
+
+                        # print(f"min: {batch['obs']['agent_pos'].min()}, max: {batch['obs']['agent_pos'].max()}")
+
+                        # with open('infer/infer.json', 'w', encoding='utf-8') as f:
+
+                        #     json.dump(dict_apply(batch, lambda x: x.to('cpu').detach().numpy().tolist()[0]), f, indent='\t')
+
+                        # for key in batch['obs'].keys():
+                        #     print(f'{key}: {batch["obs"][key].shape}')
+                        #     print(f"min: {batch['obs'][key].min()}, max: {batch['obs'][key].max()}")
+                        
+                        # raise(ValueError)
                 
                     # compute loss
                     t1_1 = time.time()
@@ -363,6 +377,45 @@ class TrainDP3Workspace:
             if isinstance(value, float):
                 cprint(f"{key}: {value:.4f}", 'magenta')
         
+    def inference(self, obs):
+        # load the latest checkpoint
+        
+        cfg = copy.deepcopy(self.cfg)
+        
+        lastest_ckpt_path = self.get_checkpoint_path(tag="latest")
+        if lastest_ckpt_path.is_file():
+            cprint(f"Resuming from checkpoint {lastest_ckpt_path}", 'magenta')
+            self.load_checkpoint(path=lastest_ckpt_path)
+        
+        policy = self.model
+        if cfg.training.use_ema:
+            policy = self.ema_model
+        policy.eval()
+        policy.cuda()
+
+        # create obs dict
+        np_obs_dict = dict(obs)
+        # device transfer
+        obs_dict = dict_apply(np_obs_dict,
+            lambda x: torch.from_numpy(x).to(
+            device=policy.device))
+
+        with torch.no_grad():
+            obs_dict_input = {}  # flush unused keys
+            obs_dict_input['point_cloud'] = obs_dict['point_cloud'].unsqueeze(0)
+            obs_dict_input['agent_pos'] = obs_dict['agent_pos'].unsqueeze(0)
+            action_dict = policy.predict_action(obs_dict_input)
+
+            # device_transfer
+            np_action_dict = dict_apply(action_dict,
+                                        lambda x: x.detach().to('cpu').numpy())
+
+            action = np_action_dict['action'].squeeze(0)
+
+            return action
+        
+
+
     @property
     def output_dir(self):
         output_dir = self._output_dir
