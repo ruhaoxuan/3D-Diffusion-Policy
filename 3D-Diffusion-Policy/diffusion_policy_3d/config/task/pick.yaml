@@ -22,7 +22,7 @@ env_runner: null
 
 dataset:
   _target_: diffusion_policy_3d.dataset.adroit_dataset.AdroitDataset
-  zarr_path: data/final_pick_sim.zarr
+  zarr_path: ../data/final_pick_sim.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}

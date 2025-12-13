@@ -1,19 +1,13 @@
 # usage:
 #       bash scripts/vrl3_gen_demonstration_expert.sh door
-import matplotlib.pyplot as plt
 import argparse
 import os
 import torch
 from termcolor import cprint
-from PIL import Image
 import zarr
 from copy import deepcopy
 import numpy as np
 
-from pathlib import Path
-
-import re
-from typing import List, Union
 from pathlib import Path
 
 import h5py
@@ -26,48 +20,6 @@ FX, FY, CX, CY = 72.70, 72.72, 42.0, 42.0
 STEP = 1
 WIDTH = 84
 HEIGHT = 84
-
-def extract_with_pattern(dir_path: Union[str, Path],
-                         pattern: str = r'.*\.jpg$',
-                         recursive: bool = False,
-                         sort_key: str = 'numeric') -> List[Path]:
-    """
-    从目录中提取符合正则 pattern 的文件列表并排序。
-    参数:
-      dir_path: 目录路径（str 或 Path）
-      pattern: 正则表达式，默认匹配所有 .jpg 文件（不区分大小写可在 pattern 中添加 (?i)）
-      recursive: 是否递归子目录（默认 False）
-      sort_key: 'name'（按文件名字符串排序）或 'numeric'（按文件名前数字排序，如果无法解析回退到 name）
-    返回:
-      符合条件的 Path 列表（已排序）
-    示例:
-      jpgs = extract_with_pattern(path, pattern=r'^\d+_frame_\d+\.jpg$')
-    """
-    p = Path(dir_path)
-    if not p.exists():
-        return []
-
-    regex = re.compile(pattern)
-    if recursive:
-        it = p.rglob('*')
-    else: 
-        it = p.iterdir()
-
-    files = [f.name for f in it if f.is_file() and regex.match(f.name)]
-    if sort_key == 'numeric':
-        def _num_key(fp: str):
-            name = fp
-            m = re.match(r'(\d+)', name)
-            if m:
-                return int(m.group(1))
-            return name
-        try:
-            files.sort(key=_num_key)
-        except Exception:
-            files.sort()
-    else:
-        files.sort()
-    return files
 
 def read_hdf5_example(filename='example.h5'):
     """读取并探索HDF5文件内容"""
@@ -157,26 +109,6 @@ def get_rgb(path):
     
     return img_rgb
 
-def depth_info(path):
-    depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    print(f"数据类型: {depth.dtype}")
-    print(f"形状: {depth.shape}")
-    
-    # 根据数据类型判断位深
-    dtype_to_bit = {
-        'uint8': 8,
-        'uint16': 16,
-        'int16': 16,
-        'float32': 32,
-        'float64': 64
-    }
-    
-    bit_depth = dtype_to_bit.get(str(depth.dtype), "未知")
-    print(f"位深: {bit_depth}位")
-    
-    # 显示数值范围
-    print(f"最小值: {depth.min()}, 最大值: {depth.max()}")
-
 def get_depth(path):
     depth_16bit = cv2.imread(path, cv2.IMREAD_ANYDEPTH)  # 保持原始位深
 
@@ -241,6 +173,7 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='data', help='directory to extract data')
     parser.add_argument('--img_size', type=int, default=84, help='image size')
     parser.add_argument('--use_point_crop', action='store_true', help='use point crop')
+    parser.add_argument('--sample_step', type=int, default=10, help='sampling step for data')
     args = parser.parse_args()
     return args
 
@@ -258,7 +191,7 @@ def main():
     args = parse_args()
     
     num_episodes = args.num_episodes
-    save_dir = os.path.join(args.save_dir, 'final_'+args.env_name+'_sim.zarr')
+    save_dir = os.path.join(args.save_dir, args.env_name+'_zarr_dp3_sim')
     if os.path.exists(save_dir):
         cprint('Data already exists at {}'.format(save_dir), 'red')
         cprint("If you want to overwrite, delete the existing directory first.", "red")
@@ -297,30 +230,59 @@ def main():
             # print(entry_path)
             
             # get sub data
-            rgb_files = extract_with_pattern(entry_path, r'^\d+\.jpg$')
-            rgb_files = choose(rgb_files)
-
-            rgb_imgs = [get_rgb(entry_path / image) for image in rgb_files]
+            # Reference convert_zarr.py logic: drive by h5 files
             
-            # print(entry_path / rgb_files[0]) ##
+            # 1. Find all h5 files
+            h5_files = [f for f in os.listdir(entry_path) if f.endswith('.h5')]
+            
+            # 2. Sort and filter by sample_step
+            # Assuming filenames are numbers like "0.h5", "1.h5"
+            try:
+                h5_files.sort(key=lambda x: int(os.path.splitext(x)[0]))
+            except ValueError:
+                h5_files.sort() # Fallback
+            
+            # Filter by sample_step
+            h5_files = [f for f in h5_files if int(os.path.splitext(f)[0]) % args.sample_step == 0]
+            
+            rgb_imgs = []
+            depth_imgs = []
+            h5_datas = []
+            
+            for h5_file in h5_files:
+                h5_path = entry_path / h5_file
+                
+                # Read H5
+                h5_datas.append(read_hdf5_example(str(h5_path)))
+                
+                # Construct image paths
+                file_stem = os.path.splitext(h5_file)[0]
+                
+                # RGB: try jpg then png
+                img_name = f"{file_stem}.jpg"
+                img_path = entry_path / img_name
+                if not img_path.exists():
+                     img_name = f"{file_stem}.png"
+                     img_path = entry_path / img_name
+                
+                if not img_path.exists():
+                    cprint(f"Warning: Image not found for {h5_file}", 'yellow')
+                
+                rgb_imgs.append(get_rgb(str(img_path)))
+                
+                # Depth: {number}_depth.png
+                depth_name = f"{file_stem}_depth.png"
+                depth_path = entry_path / depth_name
+                
+                if not depth_path.exists():
+                     cprint(f"Warning: Depth not found for {h5_file}", 'yellow')
+                
+                depth_imgs.append(get_depth(str(depth_path)))
 
-            depth_files = extract_with_pattern(entry_path, r'^\d+_depth.png$')
-            depth_files = choose(depth_files)
-
-            # info = depth_info(entry_path / depth_files[0])
-            # test_depth = get_depth(entry_path / depth_files[0])
-
-            depth_imgs = [get_depth(entry_path / image) for image in depth_files]
-
-            h5_files = extract_with_pattern(entry_path, r'^.+\.h5$')
-            h5_files = choose(h5_files, STEP * 5)
-
-            # print(rgb_files[:10])
-            # print(depth_files[:10])
-            # print(h5_files[:10])
-            # return
-
-            h5_datas = [read_hdf5_example(entry_path / h) for h in h5_files]
+            # Ensure we have enough data
+            if len(h5_datas) < 2:
+                cprint(f"Skipping {entry_path}: Not enough data ({len(h5_datas)} steps)", 'yellow')
+                continue
 
             img_arrays_sub = rgb_imgs[:-1]
             depth_arrays_sub = depth_imgs[:-1]
@@ -328,6 +290,9 @@ def main():
             action_arrays_sub = [get_action(data) for data in h5_datas[1:]]
             total_count_sub = len(rgb_imgs[:-1])
             point_cloud_arrays_sub = [get_point_cloud(depth) for depth in depth_imgs[:-1]]
+
+            assert len(img_arrays_sub) == len(depth_arrays_sub) == len(state_arrays_sub) == len(action_arrays_sub) == len(point_cloud_arrays_sub), \
+                f"Data length mismatch at {entry_path}: img={len(img_arrays_sub)}, depth={len(depth_arrays_sub)}, state={len(state_arrays_sub)}, action={len(action_arrays_sub)}, point_cloud={len(point_cloud_arrays_sub)}"
 
             # print('depth:', depth_imgs[0].shape)
             # print('rgb:', rgb_imgs[0].shape)
@@ -355,76 +320,7 @@ def main():
     # print(episode_ends_arrays)
     print(state_arrays[0])
 
-    # loop over episodes
-    '''
-    minimal_episode_length = 100
-    episode_idx = 0
-    while episode_idx < num_episodes:
-        env = create_env()
-        time_step = env.reset()
-        input_obs_visual = time_step.observation # (3n,84,84), unit8
-        input_obs_sensor = time_step.observation_sensor # float32, door(24,)q        
 
-        total_reward = 0.
-        n_goal_achieved_total = 0.
-        step_count = 0
-        
-        img_arrays_sub = []
-        point_cloud_arrays_sub = []
-        depth_arrays_sub = []
-        state_arrays_sub = []
-        action_arrays_sub = []act
-        total_count_sub = 0
-        
-        while (not time_step.last()) or step_count < minimal_episode_length:
-            with torch.no_grad(), utils.eval_mode(expert_agent):
-                input_obs_visual = time_step.observation
-                input_obs_sensor = time_step.observation_sensor
-                # cam: top, vil_camera, fixed
-                # vrl3_input = render_camera(env.env._env.sim, camera_name="top").transpose(2,0,1).copy() # (3,84,84)
-                    
-                action = expert_agent.act(obs=input_obs_visual, step=0,
-                                        eval_mode=True, 
-                                        obs_sensor=input_obs_sensor) # (28,) float32
-                
-                if args.not_use_multi_view:
-                    input_obs_visual = input_obs_visual[:3] # (3,84,84)
-                
-
-                        
-                # save data
-                total_count_sub += 1
-                img_arrays_sub.append(input_obs_visual)
-                state_arrays_sub.append(input_obs_sensor)
-                action_arrays_sub.append(action)
-                point_cloud_arrays_sub.append(time_step.observation_pointcloud)
-                depth_arrays_sub.append(time_step.observation_depth)
-                
-            time_step = env.step(action)
-            obs = time_step.observation # np array, (3,84,84)
-            obs = obs[:3] if obs.shape[0] > 3 else obs # (3,84,84)
-            n_goal_achieved_total += time_step.n_goal_achieved
-            total_reward += time_step.reward
-            step_count += 1
-            
-        if n_goal_achieved_total < 10.:
-            cprint(f"Episode {episode_idx} has {n_goal_achieved_total} goals achieved and {total_reward} reward. Discarding.", 'red')
-        else:
-            total_count += total_count_sub
-            episode_ends_arrays.append(deepcopy(total_count)) # the index of the last step of the episode    
-            img_arrays.extend(deepcopy(img_arrays_sub))
-            point_cloud_arrays.extend(deepcopy(point_cloud_arrays_sub))
-            depth_arrays.extend(deepcopy(depth_arrays_sub))
-            state_arrays.extend(deepcopy(state_arrays_sub))
-            action_arrays.extend(deepcopy(action_arrays_sub))
-            print('Episode: {}, Reward: {}, Goal Achieved: {}'.format(episode_idx, total_reward, n_goal_achieved_total)) 
-            episode_idx += 1
-
-    # tracemalloc.stop()
-
-    '''
-
-    # return
 
     ###############################
     # save data
