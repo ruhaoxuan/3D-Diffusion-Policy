@@ -210,10 +210,12 @@ class DP3Agent:
         # But here we just pass it to arm.
         
         target_pose = np.concatenate([xyz, quat])
-        self.arm.set_tcp_pose(target_pose)
+        # self.arm.set_tcp_pose(target_pose)
+        self.arm.move_ee(target_pose)
 
     def set_tcp_gripper(self, width):
-        self.arm.set_gripper_position(width)
+        # self.arm.set_gripper_position(width)
+        self.arm.move_gripper(width)
 
 # -----------------------------------------------------------------------------
 # Point Cloud Generation
@@ -372,7 +374,7 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
 @click.option('--output', '-o', default=None, type=str, help='Directory to save recording')
 @click.option('--max_duration', '-md', default=1000, help='Max duration in steps.')
 @click.option('--gripper', '-g', is_flag=True, default=False, type=bool, help='Enable gripper control')
-@click.option('--continuous', '-c', is_flag=True, default=True, type=bool, help='Enable continuous testing mode')
+@click.option('--continuous', '-c', is_flag=True, default=False, type=bool, help='Enable continuous testing mode')
 def main(ckpt, output, max_duration, gripper, continuous):
     global interrupted
     
