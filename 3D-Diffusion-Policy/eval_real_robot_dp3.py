@@ -119,11 +119,10 @@ def transform_ee_pose_frame(ee_pose: np.ndarray, frame: str) -> np.ndarray:
         raise ValueError(f"Unsupported frame type: {frame}")
 
 class DP3Agent:
-    def __init__(self, obs_num, gripper, frame="base", use_rot6d=True, **kwargs):
+    def __init__(self, obs_num, gripper, frame="base", **kwargs):
         self.obs_num = obs_num
         self.frame = frame
         self.gripper = gripper
-        self.use_rot6d = use_rot6d
         
         self.rgb_buffer = deque(maxlen=obs_num)
         self.depth_buffer = deque(maxlen=obs_num)
@@ -168,11 +167,8 @@ class DP3Agent:
         arm_ee_pose = self.arm.get_tcp_position()
         transformed_ee_pose = transform_ee_pose_frame(arm_ee_pose, self.frame)
         xyz, quat = transformed_ee_pose[:3], transformed_ee_pose[3:7]
-        if self.use_rot6d:
-            rot6d = quat2rot6d_transformer.forward(np.array(quat))
-            pose = np.concatenate([xyz, rot6d])
-        else:
-            pose = np.concatenate([xyz, quat])
+        rot6d = quat2rot6d_transformer.forward(np.array(quat))
+        pose = np.concatenate([xyz, rot6d])
         
         if self.gripper:
             gripper_width = self.arm.get_gripper_position()
@@ -192,13 +188,10 @@ class DP3Agent:
         }
     
     def set_tcp_pose(self, pose):
-        # pose: 9-dim (xyz + rot6d) or 7-dim (xyz + quat)
+        # pose: 9-dim (xyz + rot6d)
         xyz = pose[:3]
-        if self.use_rot6d:
-            rot6d = pose[3:9]
-            quat = rot6d_quat_transformer.forward(rot6d)
-        else:
-            quat = pose[3:7]
+        rot6d = pose[3:9]
+        quat = rot6d_quat_transformer.forward(rot6d)
         
         # Transform back if needed? Assuming input is in 'frame'
         # If frame is camera, we need to transform back to base for robot control
@@ -346,17 +339,10 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
             if step_action is None:
                 continue
                 
-            # Execute action
-            # step_action: 9-dim (xyz + rot6d) or 10-dim (+gripper)
-            # or 7-dim (xyz + quat) or 8-dim (+gripper)
-            if agent.use_rot6d:
-                agent.set_tcp_pose(step_action[:9])
-                if gripper and len(step_action) > 9:
-                    agent.set_tcp_gripper(step_action[9])
-            else:
-                agent.set_tcp_pose(step_action[:7])
-                if gripper and len(step_action) > 7:
-                    agent.set_tcp_gripper(step_action[7])
+            # Execute action: 9-dim (xyz + rot6d) or 10-dim (+gripper)
+            agent.set_tcp_pose(step_action[:9])
+            if gripper and len(step_action) > 9:
+                agent.set_tcp_gripper(step_action[9])
                 
             # Record
             if output is not None:
@@ -397,32 +383,23 @@ def main(ckpt, output, max_duration, gripper, continuous):
     # Setup Agent
     n_obs_steps = cfg.n_obs_steps
     
-    # Determine observation params from cfg
+    # Determine observation params from cfg (rot6d only)
     try:
         agent_pos_shape = cfg.task.shape_meta.obs.agent_pos.shape
         state_dim = agent_pos_shape[0]
     except:
         state_dim = 9 # Default fallback
-        
-    use_rot6d = True
-    model_has_gripper = False
-    
-    if state_dim == 7: # xyz + quat
-        use_rot6d = False
+
+    if state_dim == 9:
         model_has_gripper = False
-    elif state_dim == 8: # xyz + quat + gripper
-        use_rot6d = False
+    elif state_dim == 10:
         model_has_gripper = True
-    elif state_dim == 9: # xyz + rot6d
-        use_rot6d = True
-        model_has_gripper = False
-    elif state_dim == 10: # xyz + rot6d + gripper
-        use_rot6d = True
-        model_has_gripper = True
-        
-    cprint(f"Detected state dim: {state_dim}, use_rot6d: {use_rot6d}, model_has_gripper: {model_has_gripper}", "yellow")
+    else:
+        raise ValueError(f"Unsupported state_dim {state_dim} for rot6d-only setup. Expected 9 or 10.")
     
-    agent = DP3Agent(obs_num=n_obs_steps, gripper=model_has_gripper, use_rot6d=use_rot6d)
+    cprint(f"Detected state dim: {state_dim}, use_rot6d: True, model_has_gripper: {model_has_gripper}", "yellow")
+    
+    agent = DP3Agent(obs_num=n_obs_steps, gripper=model_has_gripper)
     
     if continuous:
         episode_count = 0

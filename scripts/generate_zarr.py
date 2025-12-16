@@ -14,12 +14,20 @@ import h5py
 import cv2
 import open3d as o3d
 import pytorch3d.ops as torch3d_ops
+import pytorch3d.transforms as torch3d_tf
 
 # constant
 FX, FY, CX, CY = 72.70, 72.72, 42.0, 42.0
 STEP = 1
 WIDTH = 84
 HEIGHT = 84
+
+
+def quat_to_rot6d(quat: np.ndarray) -> np.ndarray:
+    """Convert quaternion (w, x, y, z) to 6D rotation representation."""
+    quat_t = torch.tensor(quat, dtype=torch.float32).view(-1, 4)
+    rot6d = torch3d_tf.matrix_to_rotation_6d(torch3d_tf.quaternion_to_matrix(quat_t))
+    return rot6d.detach().cpu().numpy().reshape(-1)
 
 def read_hdf5_example(filename='example.h5'):
     """读取并探索HDF5文件内容"""
@@ -152,12 +160,27 @@ def get_point_cloud(depth_map):
     ## 还没考虑降采样
 
 def get_state(data):
-    state = np.array(np.concatenate((data['ee_states'], data['gripper_control'])))
-
-    return state
+    pose = np.array(data['ee_states'])
+    xyz = pose[:3]
+    quat = pose[3:7]
+    rot6d = quat_to_rot6d(np.array(quat))
+    base_state = np.concatenate((xyz, rot6d))
+    if 'gripper_control' in data and data['gripper_control'] is not None:
+        gripper = np.array(data['gripper_control']).reshape(-1)
+        base_state = np.concatenate((base_state, gripper))
+    return base_state
 
 def get_action(data):
-    return get_state(data)
+    # use ee_control for action and keep gripper control consistent
+    pose = np.array(data['ee_control']) if 'ee_control' in data else np.array(data['ee_states'])
+    xyz = pose[:3]
+    quat = pose[3:7]
+    rot6d = quat_to_rot6d(np.array(quat))
+    base_action = np.concatenate((xyz, rot6d))
+    if 'gripper_control' in data and data['gripper_control'] is not None:
+        gripper = np.array(data['gripper_control']).reshape(-1)
+        base_action = np.concatenate((base_action, gripper))
+    return base_action
 
 def choose(ls, step=STEP):
     return [x for i, x in enumerate(ls) if i % step == 0]
