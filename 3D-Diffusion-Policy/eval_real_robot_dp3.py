@@ -291,7 +291,7 @@ def _keyboard_signal_handler(key):
 keyboard_listener = keyboard.Listener(on_press=_keyboard_signal_handler)
 keyboard_listener.start()
 
-def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output):
+def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval):
     global interrupted
     global keyboard_listener
     
@@ -343,6 +343,10 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
             agent.set_tcp_pose(step_action[:9])
             if gripper and len(step_action) > 9:
                 agent.set_tcp_gripper(step_action[9])
+
+            # Rate limiting to slow down execution
+            if ctrl_interval is not None and ctrl_interval > 0:
+                time.sleep(ctrl_interval)
                 
             # Record
             if output is not None:
@@ -361,7 +365,8 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
 @click.option('--max_duration', '-md', default=1000, help='Max duration in steps.')
 @click.option('--gripper', '-g', is_flag=True, default=False, type=bool, help='Enable gripper control')
 @click.option('--continuous', '-c', is_flag=True, default=False, type=bool, help='Enable continuous testing mode')
-def main(ckpt, output, max_duration, gripper, continuous):
+@click.option('--ctrl_hz', default=5.0, type=float, help='Control frequency (Hz). Set 0 to disable rate limiting')
+def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz):
     global interrupted
     
     # Load Checkpoint
@@ -400,6 +405,8 @@ def main(ckpt, output, max_duration, gripper, continuous):
     cprint(f"Detected state dim: {state_dim}, use_rot6d: True, model_has_gripper: {model_has_gripper}", "yellow")
     
     agent = DP3Agent(obs_num=n_obs_steps, gripper=model_has_gripper)
+
+    ctrl_interval = 1.0 / ctrl_hz if ctrl_hz > 0 else 0.0
     
     if continuous:
         episode_count = 0
@@ -414,7 +421,7 @@ def main(ckpt, output, max_duration, gripper, continuous):
                 episode_output = os.path.join(output, f"episode_{episode_count:03d}")
                 os.makedirs(episode_output, exist_ok=True)
                 
-            success = run_single_episode(agent, policy, cfg, device, max_duration, gripper, episode_output)
+            success = run_single_episode(agent, policy, cfg, device, max_duration, gripper, episode_output, ctrl_interval)
             
             if success:
                 cprint(f"Test No. {episode_count} finished", "green")
@@ -431,7 +438,7 @@ def main(ckpt, output, max_duration, gripper, continuous):
     else:
         if output is not None:
             os.makedirs(output, exist_ok=True)
-        run_single_episode(agent, policy, cfg, device, max_duration, gripper, output)
+    run_single_episode(agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval)
         
     agent.arm.home_robot()
     print("Goodbye.")
