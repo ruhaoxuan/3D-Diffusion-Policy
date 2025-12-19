@@ -16,12 +16,11 @@ import open3d as o3d
 import pytorch3d.ops as torch3d_ops
 import pytorch3d.transforms as torch3d_tf
 
-# constant
-FX, FY, CX, CY = 72.70, 72.72, 42.0, 42.0
-STEP = 1
-WIDTH = 84
-HEIGHT = 84
+import visualizer
 
+# constant
+from constant import *
+# FX, FY, CX, CY = 72.70, 72.72, 42.0, 42.0
 
 def quat_to_rot6d(quat: np.ndarray) -> np.ndarray:
     """Convert quaternion (w, x, y, z) to 6D rotation representation."""
@@ -130,7 +129,12 @@ def get_depth(path):
 
 
 def get_point_cloud(depth_map):
-    fx, fy, cx, cy = FX, FY, CX, CY
+    fx, fy, cx, cy = INTRINSICS_MATRIX[0, 0], INTRINSICS_MATRIX[1, 1], INTRINSICS_MATRIX[0, 2], INTRINSICS_MATRIX[1, 2]
+
+    # 深度裁剪
+    depth = depth_map.copy() / SCALE
+    depth[depth > MAX_DEPTH] = 0.0
+    depth = depth.astype(np.float32)
 
     intrinsic = o3d.camera.PinholeCameraIntrinsic(
         width=WIDTH,
@@ -141,19 +145,40 @@ def get_point_cloud(depth_map):
         cy=cy
     )
 
-    depth_image = o3d.geometry.Image(depth_map)
+    depth_image = o3d.geometry.Image(depth)
 
     pcd = o3d.geometry.PointCloud.create_from_depth_image(
         depth_image,
         intrinsic
     )
 
+    T_cw = np.linalg.inv(EXTRINSIC_MATRIX)
+    pcd.transform(T_cw)
+
+
     points = np.asarray(pcd.points)
+
+    candidate = points[points[:,2] < 0.03]
+    # print(candidate.shape, candidate.dtype)
+
+    # crop plane
+    centroid = candidate.mean(axis=0)
+    U, S, Vt = np.linalg.svd(candidate - centroid, full_matrices=False)
+    normal = Vt[-1]          # 平面法向
+    d = -normal @ centroid   # ax + by + cz + d = 0
+    dist = (points @ normal + d) / np.linalg.norm(normal)
+
+    mask = np.abs(dist) > GROUND_THRESH
+    points = points[mask]
 
     # print(points.shape)
     # return
+
+    # print('first points:', points.shape)
     
-    points = point_cloud_sampling(points, 512, 'fps')
+    points = point_cloud_sampling(points, 1024, 'fps')
+
+    # print('last points:', points.shape)
 
     return points
 
@@ -301,6 +326,15 @@ def main():
                      cprint(f"Warning: Depth not found for {h5_file}", 'yellow')
                 
                 depth_imgs.append(get_depth(str(depth_path)))
+
+                # print('enter')
+                # pcd = get_point_cloud(depth_imgs[0])
+                # print(type(pcd))
+
+                # print(pcd.shape)
+                # visualizer.visualize_pointcloud(pcd)
+
+                # raise ValueError
 
             # Ensure we have enough data
             if len(h5_datas) < 2:
