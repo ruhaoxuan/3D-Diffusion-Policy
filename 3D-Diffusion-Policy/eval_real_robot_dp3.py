@@ -23,6 +23,12 @@ from collections import deque
 import scipy.spatial.transform as st
 import termios
 
+import open3d as o3d
+sys.path.append('..')
+from scripts.constant import *
+import visualizer
+import json
+
 # Add paths
 # TAMP/policy/3D-Diffusion-Policy/3D-Diffusion-Policy/eval_real_robot_dp3.py
 # CURRENT_DIR = pathlib.Path(__file__).parent
@@ -155,7 +161,7 @@ class DP3Agent:
         # Resize if needed (DP3 usually expects specific size, e.g. 84x84 or 128x128)
         # For now, keep original or resize to 84x84 as common in DP3
         # You might need to adjust this based on your model config
-        target_size = (84, 84) 
+        target_size = (1280, 720) 
         if color is not None:
             color = cv2.resize(color, target_size, interpolation=cv2.INTER_LINEAR)
         if depth is not None:
@@ -214,20 +220,105 @@ class DP3Agent:
 # Point Cloud Generation
 # -----------------------------------------------------------------------------
 
-def get_point_cloud(depth, intrinsics):
-    # depth: (H, W)
-    # intrinsics: (3, 3)
-    H, W = depth.shape
-    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
-    cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+import pytorch3d.ops as torch3d_ops
+
+def point_cloud_sampling(point_cloud:np.ndarray, num_points:int, method:str='fps'):
+    """
+    support different point cloud sampling methods
+    point_cloud: (N, 6), xyz+rgb or (N, 3), xyz
+    """
+    if num_points == 'all': # use all points
+        return point_cloud
     
-    y, x = np.indices((H, W))
-    z = depth
-    x = (x - cx) * z / fx
-    y = (y - cy) * z / fy
-    
-    point_cloud = np.stack([x, y, z], axis=-1) # (H, W, 3)
+    if point_cloud.shape[0] <= num_points:
+        # cprint(f"warning: point cloud has {point_cloud.shape[0]} points, but we want to sample {num_points} points", 'yellow')
+        # pad with zeros
+        point_cloud_dim = point_cloud.shape[-1]
+        point_cloud = np.concatenate([point_cloud, np.zeros((num_points - point_cloud.shape[0], point_cloud_dim))], axis=0)
+        return point_cloud
+
+    if method == 'uniform':
+        # uniform sampling
+        sampled_indices = np.random.choice(point_cloud.shape[0], num_points, replace=False)
+        point_cloud = point_cloud[sampled_indices]
+    elif method == 'fps':
+        # fast point cloud sampling using torch3d
+        point_cloud = torch.from_numpy(point_cloud).unsqueeze(0).cuda()
+        num_points = torch.tensor([num_points]).cuda()
+        # remember to only use coord to sample
+        _, sampled_indices = torch3d_ops.sample_farthest_points(points=point_cloud[...,:3], K=num_points)
+        point_cloud = point_cloud.squeeze(0).cpu().numpy()
+        point_cloud = point_cloud[sampled_indices.squeeze(0).cpu().numpy()]
+    else:
+        raise NotImplementedError(f"point cloud sampling method {method} not implemented")
+
     return point_cloud
+
+
+
+def get_point_cloud(depth_map):
+    fx, fy, cx, cy = INTRINSICS_MATRIX[0, 0], INTRINSICS_MATRIX[1, 1], INTRINSICS_MATRIX[0, 2], INTRINSICS_MATRIX[1, 2]
+
+    # 深度裁剪
+    depth = depth_map.copy() / SCALE
+    depth[depth > MAX_DEPTH] = 0.0
+    depth = depth.astype(np.float32)
+
+    intrinsic = o3d.camera.PinholeCameraIntrinsic(
+        width=WIDTH,
+        height=HEIGHT,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy
+    )
+
+    depth_image = o3d.geometry.Image(depth)
+
+    pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        depth_image,
+        intrinsic
+    )
+
+    T_cw = np.linalg.inv(EXTRINSIC_MATRIX)
+    pcd.transform(T_cw)
+
+    points = np.asarray(pcd.points)
+
+    candidate = points[points[:,2] < 0.03]
+    # print(candidate.shape, candidate.dtype)
+
+    # crop plane
+    centroid = candidate.mean(axis=0)
+    U, S, Vt = np.linalg.svd(candidate - centroid, full_matrices=False)
+    normal = Vt[-1]          # 平面法向
+    d = -normal @ centroid   # ax + by + cz + d = 0
+    dist = (points @ normal + d) / np.linalg.norm(normal)
+
+    mask = np.abs(dist) > GROUND_THRESH
+    points = points[mask]
+
+    # print(points.shape)
+    # return
+
+    # print('first points:', points.shape)
+    
+    points = point_cloud_sampling(points, 1024, 'fps')
+
+    # print(len(points))
+    # indices = np.random.choice(len(points), size=len(points) // 50, replace=False)
+    # points = points[indices]
+    # with open('./tmp.json', 'w') as f:
+    #     points = points.tolist()
+    #     print(type(points))
+    #     json.dump(points, f)
+
+    # raise ValueError
+
+    # print('last points:', points.shape)
+
+    return points
+
 
 def get_real_obs_dict(agent_obs, shape_meta):
     # agent_obs: {'rgb': (T, H, W, 3), 'depth': (T, H, W), 'pose': (T, D)}
@@ -238,36 +329,20 @@ def get_real_obs_dict(agent_obs, shape_meta):
     pose = agent_obs['pose']
     
     T, H, W, _ = rgb.shape
+
+    print('H W:', H, W)
     
     # Intrinsics - HARDCODED for now, replace with actual camera intrinsics
     # Assuming 84x84 and some FOV
-    intrinsics = np.array([[42.0, 0, 42.0], [0, 42.0, 42.0], [0, 0, 1]]) 
+    # intrinsics = np.array([[42.0, 0, 42.0], [0, 42.0, 42.0], [0, 0, 1]]) 
     
     point_clouds = []
     for i in range(T):
-        pc = get_point_cloud(depth[i], intrinsics) # (H, W, 3)
+        pc = get_point_cloud(depth[i]) # (H, W, 3)
         
-        # Color
-        color = rgb[i] / 255.0
-        pc_color = np.concatenate([pc, color], axis=-1) # (H, W, 6)
+        point_clouds.append(pc)
         
-        # Flatten
-        pc_flat = pc_color.reshape(-1, 6)
-        
-        # Downsample/Crop to fixed number of points (e.g. 1024 or 512)
-        # DP3 usually expects fixed number of points
-        n_points = 1024 # Default for many DP3 configs
-        if pc_flat.shape[0] > n_points:
-            indices = np.random.choice(pc_flat.shape[0], n_points, replace=False)
-            pc_flat = pc_flat[indices]
-        else:
-            # Pad if not enough
-            indices = np.random.choice(pc_flat.shape[0], n_points, replace=True)
-            pc_flat = pc_flat[indices]
-            
-        point_clouds.append(pc_flat)
-        
-    point_clouds = np.array(point_clouds) # (T, N, 6)
+    point_clouds = np.array(point_clouds) # (T, N, 3)
     
     return {
         'point_cloud': point_clouds.astype(np.float32),
