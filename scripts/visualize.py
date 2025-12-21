@@ -25,9 +25,9 @@ def take_an_obs(batch):
     return obs
 
 
-with open('3D-Diffusion-Policy/infer/infer.json', 'r', encoding='utf-8') as f:
-        obs = take_an_obs(json.load(f))
-        pointcloud = obs['point_cloud'][3]
+with open('tmp.json', 'r', encoding='utf-8') as f:
+        pointcloud = json.load(f)
+        pointcloud = np.array(pointcloud)
 
 print(pointcloud.shape)
 
