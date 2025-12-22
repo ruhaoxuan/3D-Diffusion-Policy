@@ -341,12 +341,12 @@ def main():
                 cprint(f"Skipping {entry_path}: Not enough data ({len(h5_datas)} steps)", 'yellow')
                 continue
 
-            img_arrays_sub = rgb_imgs[:-1]
-            depth_arrays_sub = depth_imgs[:-1]
-            state_arrays_sub = [get_state(data) for data in h5_datas[:-1]]
-            action_arrays_sub = [get_action(data) for data in h5_datas[1:]]
-            total_count_sub = len(rgb_imgs[:-1])
-            point_cloud_arrays_sub = [get_point_cloud(depth) for depth in depth_imgs[:-1]]
+            img_arrays_sub = rgb_imgs
+            depth_arrays_sub = depth_imgs
+            state_arrays_sub = [get_state(data) for data in h5_datas]
+            action_arrays_sub = [get_action(data) for data in h5_datas]
+            total_count_sub = len(rgb_imgs)
+            point_cloud_arrays_sub = [get_point_cloud(depth) for depth in depth_imgs]
 
             assert len(img_arrays_sub) == len(depth_arrays_sub) == len(state_arrays_sub) == len(action_arrays_sub) == len(point_cloud_arrays_sub), \
                 f"Data length mismatch at {entry_path}: img={len(img_arrays_sub)}, depth={len(depth_arrays_sub)}, state={len(state_arrays_sub)}, action={len(action_arrays_sub)}, point_cloud={len(point_cloud_arrays_sub)}"
