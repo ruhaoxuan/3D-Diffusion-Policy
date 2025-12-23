@@ -327,12 +327,6 @@ def get_real_obs_dict(agent_obs, shape_meta, sensor_config: dict):
     pose = agent_obs['pose']
     
     T, H, W, _ = rgb.shape
-
-    print('H W:', H, W)
-    
-    # Intrinsics - HARDCODED for now, replace with actual camera intrinsics
-    # Assuming 84x84 and some FOV
-    # intrinsics = np.array([[42.0, 0, 42.0], [0, 42.0, 42.0], [0, 0, 1]]) 
     
     point_clouds = []
     for i in range(T):
@@ -439,7 +433,7 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
 @click.option('--gripper', '-g', is_flag=True, default=False, type=bool, help='Enable gripper control')
 @click.option('--continuous', '-c', is_flag=True, default=False, type=bool, help='Enable continuous testing mode')
 @click.option('--ctrl_hz', default=10.0, type=float, help='Control frequency (Hz). Set 0 to disable rate limiting')
-@click.option('--config', '-c', required=True, type=str, help='Path to camera/sensor YAML config (required)')
+@click.option('--config', required=True, type=str, help='Path to camera/sensor YAML config (required)')
 def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz, config):
     global interrupted
     
