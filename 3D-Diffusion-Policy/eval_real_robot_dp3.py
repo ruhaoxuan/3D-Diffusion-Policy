@@ -24,8 +24,10 @@ import scipy.spatial.transform as st
 import termios
 
 import open3d as o3d
+import yaml
 sys.path.append('..')
-from scripts.constant import *
+# Do NOT import hardcoded constants from scripts.constant here.
+# The script will read required camera/sensor parameters from a YAML config passed at runtime.
 import visualizer
 import json
 
@@ -256,17 +258,35 @@ def point_cloud_sampling(point_cloud:np.ndarray, num_points:int, method:str='fps
 
 
 
-def get_point_cloud(depth_map):
-    fx, fy, cx, cy = INTRINSICS_MATRIX[0, 0], INTRINSICS_MATRIX[1, 1], INTRINSICS_MATRIX[0, 2], INTRINSICS_MATRIX[1, 2]
+def get_point_cloud(config, depth_map):
+    # Parse config
+    width = config['camera']['width']
+    height = config['camera']['height']
+    max_depth = config['camera']['max_depth']
+    scale = config['camera']['scale']
+    
+    intrinsics = np.array(config['camera']['intrinsics'])
+    # Apply scaling
+    sx = width / 1280.0
+    sy = height / 720.0
+    intrinsics[0, 0] *= sx
+    intrinsics[1, 1] *= sy
+    intrinsics[0, 2] *= sx
+    intrinsics[1, 2] *= sy
+    
+    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+    
+    extrinsic_matrix = np.array(config['camera']['extrinsics'])
+    crop_bounds = config['processing']['crop_bounds']
 
     # 深度裁剪
-    depth = depth_map.copy() / SCALE
-    depth[depth > MAX_DEPTH] = 0.0
+    depth = depth_map.copy() / scale
+    depth[depth > max_depth] = 0.0
     depth = depth.astype(np.float32)
 
     intrinsic = o3d.camera.PinholeCameraIntrinsic(
-        width=WIDTH,
-        height=HEIGHT,
+        width=width,
+        height=height,
         fx=fx,
         fy=fy,
         cx=cx,
@@ -280,47 +300,25 @@ def get_point_cloud(depth_map):
         intrinsic
     )
 
-    T_cw = np.linalg.inv(EXTRINSIC_MATRIX)
+    T_cw = np.linalg.inv(extrinsic_matrix)
     pcd.transform(T_cw)
+
 
     points = np.asarray(pcd.points)
 
-    candidate = points[points[:,2] < 0.03]
-    # print(candidate.shape, candidate.dtype)
-
-    # crop plane
-    centroid = candidate.mean(axis=0)
-    U, S, Vt = np.linalg.svd(candidate - centroid, full_matrices=False)
-    normal = Vt[-1]          # 平面法向
-    d = -normal @ centroid   # ax + by + cz + d = 0
-    dist = (points @ normal + d) / np.linalg.norm(normal)
-
-    mask = np.abs(dist) > GROUND_THRESH
+    # Bounding Box Crop
+    x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
+    mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
+           (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
+           (points[:, 2] > z_min) & (points[:, 2] < z_max)
     points = points[mask]
-
-    # print(points.shape)
-    # return
-
-    # print('first points:', points.shape)
     
     points = point_cloud_sampling(points, 1024, 'fps')
-
-    # print(len(points))
-    # indices = np.random.choice(len(points), size=len(points) // 50, replace=False)
-    # points = points[indices]
-    # with open('./tmp.json', 'w') as f:
-    #     points = points.tolist()
-    #     print(type(points))
-    #     json.dump(points, f)
-
-    # raise ValueError
-
-    # print('last points:', points.shape)
 
     return points
 
 
-def get_real_obs_dict(agent_obs, shape_meta):
+def get_real_obs_dict(agent_obs, shape_meta, sensor_config: dict):
     # agent_obs: {'rgb': (T, H, W, 3), 'depth': (T, H, W), 'pose': (T, D)}
     # Output: {'point_cloud': (T, N, 3 or 6), 'agent_pos': (T, D)}
     
@@ -338,7 +336,7 @@ def get_real_obs_dict(agent_obs, shape_meta):
     
     point_clouds = []
     for i in range(T):
-        pc = get_point_cloud(depth[i]) # (H, W, 3)
+        pc = get_point_cloud(sensor_config, depth[i]) # (H, W, 3)
         
         point_clouds.append(pc)
         
@@ -366,7 +364,7 @@ def _keyboard_signal_handler(key):
 keyboard_listener = keyboard.Listener(on_press=_keyboard_signal_handler)
 keyboard_listener.start()
 
-def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval):
+def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval, sensor_config: dict):
     global interrupted
     global keyboard_listener
     
@@ -383,7 +381,7 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
     obs = agent.get_observation()
     with torch.no_grad():
         policy.reset()
-        obs_dict_np = get_real_obs_dict(obs, cfg.task.shape_meta)
+        obs_dict_np = get_real_obs_dict(obs, cfg.task.shape_meta, sensor_config)
         obs_dict = dict_apply(obs_dict_np, lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
         result = policy.predict_action(obs_dict)
         del result
@@ -403,9 +401,9 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
             
             if t % 5 == 0: # Inference frequency
                 obs = agent.get_observation()
-                obs_dict_np = get_real_obs_dict(obs, cfg.task.shape_meta)
+                obs_dict_np = get_real_obs_dict(obs, cfg.task.shape_meta, sensor_config)
                 obs_dict = dict_apply(obs_dict_np, lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
-                
+
                 result = policy.predict_action(obs_dict)
                 raw_action = result['action'][0].detach().to('cpu').numpy()
                 ensemble_buffer.add_action(raw_action, t)
@@ -440,13 +438,18 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
 @click.option('--max_duration', '-md', default=1000, help='Max duration in steps.')
 @click.option('--gripper', '-g', is_flag=True, default=False, type=bool, help='Enable gripper control')
 @click.option('--continuous', '-c', is_flag=True, default=False, type=bool, help='Enable continuous testing mode')
-@click.option('--ctrl_hz', default=5.0, type=float, help='Control frequency (Hz). Set 0 to disable rate limiting')
-def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz):
+@click.option('--ctrl_hz', default=10.0, type=float, help='Control frequency (Hz). Set 0 to disable rate limiting')
+@click.option('--config', '-c', required=True, type=str, help='Path to camera/sensor YAML config (required)')
+def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz, config):
     global interrupted
     
     # Load Checkpoint
     payload = torch.load(open(ckpt, 'rb'), pickle_module=dill)
     cfg = payload['cfg']
+    
+    # Load sensor config from YAML (must be provided)
+    with open(config, 'r') as f:
+        sensor_config = yaml.safe_load(f)
     
     # Setup Workspace
     workspace = TrainDP3Workspace(cfg)
@@ -496,7 +499,7 @@ def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz):
                 episode_output = os.path.join(output, f"episode_{episode_count:03d}")
                 os.makedirs(episode_output, exist_ok=True)
                 
-            success = run_single_episode(agent, policy, cfg, device, max_duration, gripper, episode_output, ctrl_interval)
+            success = run_single_episode(agent, policy, cfg, device, max_duration, gripper, episode_output, ctrl_interval, sensor_config)
             
             if success:
                 cprint(f"Test No. {episode_count} finished", "green")
@@ -513,7 +516,7 @@ def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz):
     else:
         if output is not None:
             os.makedirs(output, exist_ok=True)
-    run_single_episode(agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval)
+    run_single_episode(agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval, sensor_config)
         
     agent.arm.home_robot()
     print("Goodbye.")

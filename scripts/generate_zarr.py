@@ -7,6 +7,7 @@ from termcolor import cprint
 import zarr
 from copy import deepcopy
 import numpy as np
+import yaml
 
 from pathlib import Path
 
@@ -21,6 +22,9 @@ import visualizer
 # constant
 from constant import *
 # FX, FY, CX, CY = 72.70, 72.72, 42.0, 42.0
+
+# Default CROP_BOUNDS if not provided by config
+# CROP_BOUNDS = [-0.8, 0.8, 0.3, 1.3, 0.001, 1.0]
 
 def quat_to_rot6d(quat: np.ndarray) -> np.ndarray:
     """Convert quaternion (w, x, y, z) to 6D rotation representation."""
@@ -128,17 +132,35 @@ def get_depth(path):
     return depth_16bit
 
 
-def get_point_cloud(depth_map):
-    fx, fy, cx, cy = INTRINSICS_MATRIX[0, 0], INTRINSICS_MATRIX[1, 1], INTRINSICS_MATRIX[0, 2], INTRINSICS_MATRIX[1, 2]
+def get_point_cloud(config, depth_map):
+    # Parse config
+    width = config['camera']['width']
+    height = config['camera']['height']
+    max_depth = config['camera']['max_depth']
+    scale = config['camera']['scale']
+    
+    intrinsics = np.array(config['camera']['intrinsics'])
+    # Apply scaling
+    sx = width / 1280.0
+    sy = height / 720.0
+    intrinsics[0, 0] *= sx
+    intrinsics[1, 1] *= sy
+    intrinsics[0, 2] *= sx
+    intrinsics[1, 2] *= sy
+    
+    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+    
+    extrinsic_matrix = np.array(config['camera']['extrinsics'])
+    crop_bounds = config['processing']['crop_bounds']
 
     # 深度裁剪
-    depth = depth_map.copy() / SCALE
-    depth[depth > MAX_DEPTH] = 0.0
+    depth = depth_map.copy() / scale
+    depth[depth > max_depth] = 0.0
     depth = depth.astype(np.float32)
 
     intrinsic = o3d.camera.PinholeCameraIntrinsic(
-        width=WIDTH,
-        height=HEIGHT,
+        width=width,
+        height=height,
         fx=fx,
         fy=fy,
         cx=cx,
@@ -152,37 +174,21 @@ def get_point_cloud(depth_map):
         intrinsic
     )
 
-    T_cw = np.linalg.inv(EXTRINSIC_MATRIX)
+    T_cw = np.linalg.inv(extrinsic_matrix)
     pcd.transform(T_cw)
 
 
     points = np.asarray(pcd.points)
 
-    candidate = points[points[:,2] < 0.03]
-    # print(candidate.shape, candidate.dtype)
-
-    # crop plane
-    centroid = candidate.mean(axis=0)
-    U, S, Vt = np.linalg.svd(candidate - centroid, full_matrices=False)
-    normal = Vt[-1]          # 平面法向
-    d = -normal @ centroid   # ax + by + cz + d = 0
-    dist = (points @ normal + d) / np.linalg.norm(normal)
-
-    mask = np.abs(dist) > GROUND_THRESH
+    x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
+    mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
+           (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
+           (points[:, 2] > z_min) & (points[:, 2] < z_max)
     points = points[mask]
-
-    # print(points.shape)
-    # return
-
-    # print('first points:', points.shape)
     
     points = point_cloud_sampling(points, 1024, 'fps')
 
-    # print('last points:', points.shape)
-
     return points
-
-    ## 还没考虑降采样
 
 def get_state(data):
     pose = np.array(data['ee_states'])
@@ -216,12 +222,14 @@ def choose(ls, step=STEP):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', type=str, default='pick', help='environment to run')
-    parser.add_argument('--num_episodes', type=int, default=100, help='number of episodes to run')
+    # parser.add_argument('--num_episodes', type=int, default=100, help='number of episodes to run')
     parser.add_argument('--save_dir', type=str, default='data', help='directory to save data')
     parser.add_argument('--data_dir', type=str, default='data', help='directory to extract data')
-    parser.add_argument('--img_size', type=int, default=84, help='image size')
-    parser.add_argument('--use_point_crop', action='store_true', help='use point crop')
+    # parser.add_argument('--img_size', type=int, default=84, help='image size')
+    # parser.add_argument('--use_point_crop', action='store_true', help='use point crop')
     parser.add_argument('--sample_step', type=int, default=10, help='sampling step for data')
+    parser.add_argument('--max_episodes', type=int, default=None, help='maximum number of episodes to process')
+    parser.add_argument('--config', type=str, required=True, help='path to config yaml file')
     args = parser.parse_args()
     return args
 
@@ -237,8 +245,11 @@ def render_high_res(sim, camera_name="top"):
 
 def main():
     args = parse_args()
+
+    with open(args.config, 'r') as f:
+        config = yaml.safe_load(f)
     
-    num_episodes = args.num_episodes
+    
     save_dir = os.path.join(args.save_dir, args.env_name+'_zarr_dp3_sim')
     if os.path.exists(save_dir):
         cprint('Data already exists at {}'.format(save_dir), 'red')
@@ -259,9 +270,9 @@ def main():
     cprint('Loaded remote controll data from {}'.format(data_dir), 'green')
 
     total_count = 0
-    img_arrays = []
+    # img_arrays = []
     point_cloud_arrays = []
-    depth_arrays = []
+    # depth_arrays = []
     state_arrays = []
     action_arrays = []
     episode_ends_arrays = []
@@ -269,10 +280,14 @@ def main():
     episode_idx = 0
     
     for timestamp in os.listdir(data_dir):
+        if args.max_episodes is not None and episode_idx >= args.max_episodes:
+            break
         timestamp_dir = os.path.join(data_dir, timestamp)
         print(timestamp_dir)
 
         for entry in os.listdir(timestamp_dir):
+            if args.max_episodes is not None and episode_idx >= args.max_episodes:
+                break
             entry_path = Path(timestamp_dir) / entry
 
             # print(entry_path)
@@ -306,17 +321,6 @@ def main():
                 # Construct image paths
                 file_stem = os.path.splitext(h5_file)[0]
                 
-                # RGB: try jpg then png
-                img_name = f"{file_stem}.jpg"
-                img_path = entry_path / img_name
-                if not img_path.exists():
-                     img_name = f"{file_stem}.png"
-                     img_path = entry_path / img_name
-                
-                if not img_path.exists():
-                    cprint(f"Warning: Image not found for {h5_file}", 'yellow')
-                
-                rgb_imgs.append(get_rgb(str(img_path)))
                 
                 # Depth: {number}_depth.png
                 depth_name = f"{file_stem}_depth.png"
@@ -327,29 +331,20 @@ def main():
                 
                 depth_imgs.append(get_depth(str(depth_path)))
 
-                # print('enter')
-                # pcd = get_point_cloud(depth_imgs[0])
-                # print(type(pcd))
-
-                # print(pcd.shape)
-                # visualizer.visualize_pointcloud(pcd)
-
-                # raise ValueError
-
             # Ensure we have enough data
             if len(h5_datas) < 2:
                 cprint(f"Skipping {entry_path}: Not enough data ({len(h5_datas)} steps)", 'yellow')
                 continue
 
-            img_arrays_sub = rgb_imgs
-            depth_arrays_sub = depth_imgs
+            # img_arrays_sub = rgb_imgs
+            # depth_arrays_sub = depth_imgs
             state_arrays_sub = [get_state(data) for data in h5_datas]
             action_arrays_sub = [get_action(data) for data in h5_datas]
-            total_count_sub = len(rgb_imgs)
-            point_cloud_arrays_sub = [get_point_cloud(depth) for depth in depth_imgs]
+            total_count_sub = len(depth_imgs)
+            point_cloud_arrays_sub = [get_point_cloud(config, depth) for depth in depth_imgs]
 
-            assert len(img_arrays_sub) == len(depth_arrays_sub) == len(state_arrays_sub) == len(action_arrays_sub) == len(point_cloud_arrays_sub), \
-                f"Data length mismatch at {entry_path}: img={len(img_arrays_sub)}, depth={len(depth_arrays_sub)}, state={len(state_arrays_sub)}, action={len(action_arrays_sub)}, point_cloud={len(point_cloud_arrays_sub)}"
+            assert len(depth_imgs) == len(state_arrays_sub) == len(action_arrays_sub) == len(point_cloud_arrays_sub), \
+                f"Data length mismatch at {entry_path}: depth={len(depth_imgs)}, state={len(state_arrays_sub)}, action={len(action_arrays_sub)}, point_cloud={len(point_cloud_arrays_sub)}"
 
             # print('depth:', depth_imgs[0].shape)
             # print('rgb:', rgb_imgs[0].shape)
@@ -364,9 +359,9 @@ def main():
 
             total_count += total_count_sub
             episode_ends_arrays.append(deepcopy(total_count)) # the index of the last step of the episode    
-            img_arrays.extend(deepcopy(img_arrays_sub))
+            # img_arrays.extend(deepcopy(img_arrays_sub))
             point_cloud_arrays.extend(deepcopy(point_cloud_arrays_sub))
-            depth_arrays.extend(deepcopy(depth_arrays_sub))
+            # depth_arrays.extend(deepcopy(depth_arrays_sub))
             state_arrays.extend(deepcopy(state_arrays_sub))
             action_arrays.extend(deepcopy(action_arrays_sub))
 
@@ -387,33 +382,33 @@ def main():
     zarr_data = zarr_root.create_group('data')
     zarr_meta = zarr_root.create_group('meta')
     # save img, state, action arrays into data, and episode ends arrays into meta
-    img_arrays = np.stack(img_arrays, axis=0)
-    if img_arrays.shape[1] == 3: # make channel last
-        img_arrays = np.transpose(img_arrays, (0,2,3,1))
+    # img_arrays = np.stack(img_arrays, axis=0)
+    # if img_arrays.shape[1] == 3: # make channel last
+    #     img_arrays = np.transpose(img_arrays, (0,2,3,1))
     state_arrays = np.stack(state_arrays, axis=0)
     point_cloud_arrays = np.stack(point_cloud_arrays, axis=0)
-    depth_arrays = np.stack(depth_arrays, axis=0)
+    # depth_arrays = np.stack(depth_arrays, axis=0)
     action_arrays = np.stack(action_arrays, axis=0)
     episode_ends_arrays = np.array(episode_ends_arrays)
 
     compressor = zarr.Blosc(cname='zstd', clevel=3, shuffle=1)
-    img_chunk_size = (100, img_arrays.shape[1], img_arrays.shape[2], img_arrays.shape[3])
+    # img_chunk_size = (100, img_arrays.shape[1], img_arrays.shape[2], img_arrays.shape[3])
     state_chunk_size = (100, state_arrays.shape[1])
     point_cloud_chunk_size = (100, point_cloud_arrays.shape[1], point_cloud_arrays.shape[2])
-    depth_chunk_size = (100, depth_arrays.shape[1], depth_arrays.shape[2])
+    # depth_chunk_size = (100, depth_arrays.shape[1], depth_arrays.shape[2])
     action_chunk_size = (100, action_arrays.shape[1])
-    zarr_data.create_dataset('img', data=img_arrays, chunks=img_chunk_size, dtype='uint8', overwrite=True, compressor=compressor)
+    # zarr_data.create_dataset('img', data=img_arrays, chunks=img_chunk_size, dtype='uint8', overwrite=True, compressor=compressor)
     zarr_data.create_dataset('state', data=state_arrays, chunks=state_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
     zarr_data.create_dataset('point_cloud', data=point_cloud_arrays, chunks=point_cloud_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
-    zarr_data.create_dataset('depth', data=depth_arrays, chunks=depth_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+    # zarr_data.create_dataset('depth', data=depth_arrays, chunks=depth_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
     zarr_data.create_dataset('action', data=action_arrays, chunks=action_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
     zarr_meta.create_dataset('episode_ends', data=episode_ends_arrays, dtype='int64', overwrite=True, compressor=compressor)
     
     
     # print shape
-    cprint(f'img shape: {img_arrays.shape}, range: [{np.min(img_arrays)}, {np.max(img_arrays)}]', 'green')
+    # cprint(f'img shape: {img_arrays.shape}, range: [{np.min(img_arrays)}, {np.max(img_arrays)}]', 'green')
     cprint(f'point_cloud shape: {point_cloud_arrays.shape}, range: [{np.min(point_cloud_arrays)}, {np.max(point_cloud_arrays)}]', 'green')
-    cprint(f'depth shape: {depth_arrays.shape}, range: [{np.min(depth_arrays)}, {np.max(depth_arrays)}]', 'green')
+    # cprint(f'depth shape: {depth_arrays.shape}, range: [{np.min(depth_arrays)}, {np.max(depth_arrays)}]', 'green')
     cprint(f'state shape: {state_arrays.shape}, range: [{np.min(state_arrays)}, {np.max(state_arrays)}]', 'green')
     cprint(f'action shape: {action_arrays.shape}, range: [{np.min(action_arrays)}, {np.max(action_arrays)}]', 'green')
     cprint(f'Saved zarr file to {save_dir}', 'green')
@@ -421,7 +416,7 @@ def main():
     cprint(f'Saved zarr file to {save_dir}', 'green')
     
     # clean up
-    del img_arrays, state_arrays, point_cloud_arrays, action_arrays, episode_ends_arrays
+    del state_arrays, point_cloud_arrays, action_arrays, episode_ends_arrays
     del zarr_root, zarr_data, zarr_meta
     # del env, expert_agent
     
