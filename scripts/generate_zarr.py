@@ -132,7 +132,7 @@ def get_depth(path):
     return depth_16bit
 
 
-def get_point_cloud(config, depth_map):
+def get_point_cloud(config, depth_map, color_map=None):
     # Parse config
     width = config['camera']['width']
     height = config['camera']['height']
@@ -169,26 +169,57 @@ def get_point_cloud(config, depth_map):
 
     depth_image = o3d.geometry.Image(depth)
 
-    pcd = o3d.geometry.PointCloud.create_from_depth_image(
+    # If color_map is provided, use RGBD creation to preserve colors
+    if color_map is not None:
+        # color_map is expected to be HxWx3 uint8 or float
+        color_np = color_map
+        if color_np.dtype != np.uint8:
+            # assume float in [0,1]
+            color_np = (np.clip(color_np, 0.0, 1.0) * 255.0).astype(np.uint8)
+        color_o3d = o3d.geometry.Image(color_np)
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            color_o3d, depth_image, convert_rgb_to_intensity=False, depth_scale=1.0
+        )
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
+    else:
+        pcd = o3d.geometry.PointCloud.create_from_depth_image(
+            depth_image,
+            intrinsic
+        )
+    pcd_depth = o3d.geometry.PointCloud.create_from_depth_image(
         depth_image,
         intrinsic
     )
-
     T_cw = np.linalg.inv(extrinsic_matrix)
     pcd.transform(T_cw)
-
-
+    pcd_depth.transform(T_cw)
+    
     points = np.asarray(pcd.points)
-
+    colors = None
+    if hasattr(pcd, 'colors') and np.asarray(pcd.colors).size > 0:
+        # open3d stores colors in 0-1 float
+        colors = np.asarray(pcd.colors).astype(np.float32)
+    
     x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
     mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
            (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
            (points[:, 2] > z_min) & (points[:, 2] < z_max)
     points = points[mask]
-    
-    points = point_cloud_sampling(points, 1024, 'fps')
+    if colors is not None:
+        colors = colors[mask]
 
-    return points
+    pc = points
+    if colors is not None:
+        # ensure colors shape matches and are float32 in [0,1]
+        colors = colors.astype(np.float32)
+        if colors.max() > 1.1:
+            colors = colors / 255.0
+        pc = np.concatenate([points, colors], axis=1)  # (N,6)
+
+    # sample
+    pc = point_cloud_sampling(pc, 1024, 'fps')
+
+    return pc
 
 def get_state(data):
     pose = np.array(data['ee_states'])
@@ -331,6 +362,10 @@ def main():
                 
                 depth_imgs.append(get_depth(str(depth_path)))
 
+                rgb_name = f"{file_stem}.jpg"
+                rgb_path = entry_path / rgb_name
+                rgb_imgs.append(get_rgb(str(rgb_path)))
+
             # Ensure we have enough data
             if len(h5_datas) < 2:
                 cprint(f"Skipping {entry_path}: Not enough data ({len(h5_datas)} steps)", 'yellow')
@@ -341,7 +376,8 @@ def main():
             state_arrays_sub = [get_state(data) for data in h5_datas]
             action_arrays_sub = [get_action(data) for data in h5_datas]
             total_count_sub = len(depth_imgs)
-            point_cloud_arrays_sub = [get_point_cloud(config, depth) for depth in depth_imgs]
+            # Build point clouds with colors when available
+            point_cloud_arrays_sub = [get_point_cloud(config, depth, rgb) for depth, rgb in zip(depth_imgs, rgb_imgs)]
 
             assert len(depth_imgs) == len(state_arrays_sub) == len(action_arrays_sub) == len(point_cloud_arrays_sub), \
                 f"Data length mismatch at {entry_path}: depth={len(depth_imgs)}, state={len(state_arrays_sub)}, action={len(action_arrays_sub)}, point_cloud={len(point_cloud_arrays_sub)}"

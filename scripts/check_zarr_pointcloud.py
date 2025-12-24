@@ -27,20 +27,23 @@ def get_trace(index):
     
     # Color logic
     if pc.shape[1] >= 6:
-        colors = ['rgb({},{},{})'.format(int(r), int(g), int(b)) for r, g, b in pc[:, 3:6]]
+        rgb_vals = pc[:, 3:6].astype(np.float32)
+        # If colors are in 0..1 range, scale to 0..255
+        if rgb_vals.max() <= 1.1:
+            rgb_vals = (np.clip(rgb_vals, 0.0, 1.0) * 255.0).astype(np.int32)
+        else:
+            rgb_vals = np.clip(rgb_vals, 0, 255).astype(np.int32)
+        colors = ['rgb({},{},{})'.format(int(r), int(g), int(b)) for r, g, b in rgb_vals]
+        marker_dict = dict(size=3, color=colors, opacity=0.8)
     else:
-        # Color by Z height
+        # Color by Z height (numeric -> use colorscale)
         colors = z
-    
+        marker_dict = dict(size=3, color=colors, colorscale='Viridis', opacity=0.8)
+
     trace = go.Scatter3d(
         x=x, y=y, z=z,
         mode='markers',
-        marker=dict(
-            size=3,
-            color=colors,
-            colorscale='Viridis',
-            opacity=0.8
-        )
+        marker=marker_dict
     )
     return trace
 

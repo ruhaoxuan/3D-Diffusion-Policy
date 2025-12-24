@@ -259,7 +259,7 @@ def point_cloud_sampling(point_cloud:np.ndarray, num_points:int, method:str='fps
 
 
 
-def get_point_cloud(config, depth_map):
+def get_point_cloud(config, depth_map, color_map=None):
     # Parse config
     width = config['camera']['width']
     height = config['camera']['height']
@@ -296,27 +296,57 @@ def get_point_cloud(config, depth_map):
 
     depth_image = o3d.geometry.Image(depth)
 
-    pcd = o3d.geometry.PointCloud.create_from_depth_image(
+    # If color_map is provided, use RGBD creation to preserve colors
+    if color_map is not None:
+        # color_map is expected to be HxWx3 uint8 or float
+        color_np = color_map
+        if color_np.dtype != np.uint8:
+            # assume float in [0,1]
+            color_np = (np.clip(color_np, 0.0, 1.0) * 255.0).astype(np.uint8)
+        color_o3d = o3d.geometry.Image(color_np)
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            color_o3d, depth_image, convert_rgb_to_intensity=False, depth_scale=1.0
+        )
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
+    else:
+        pcd = o3d.geometry.PointCloud.create_from_depth_image(
+            depth_image,
+            intrinsic
+        )
+    pcd_depth = o3d.geometry.PointCloud.create_from_depth_image(
         depth_image,
         intrinsic
     )
-
     T_cw = np.linalg.inv(extrinsic_matrix)
     pcd.transform(T_cw)
-
-
+    pcd_depth.transform(T_cw)
+    
     points = np.asarray(pcd.points)
-
-    # Bounding Box Crop
+    colors = None
+    if hasattr(pcd, 'colors') and np.asarray(pcd.colors).size > 0:
+        # open3d stores colors in 0-1 float
+        colors = np.asarray(pcd.colors).astype(np.float32)
+    
     x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
     mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
            (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
            (points[:, 2] > z_min) & (points[:, 2] < z_max)
     points = points[mask]
-    
-    points = point_cloud_sampling(points, 1024, 'fps')
+    if colors is not None:
+        colors = colors[mask]
 
-    return points
+    pc = points
+    if colors is not None:
+        # ensure colors shape matches and are float32 in [0,1]
+        colors = colors.astype(np.float32)
+        if colors.max() > 1.1:
+            colors = colors / 255.0
+        pc = np.concatenate([points, colors], axis=1)  # (N,6)
+
+    # sample
+    pc = point_cloud_sampling(pc, 1024, 'fps')
+
+    return pc
 
 
 def get_real_obs_dict(agent_obs, shape_meta, sensor_config: dict):
@@ -331,8 +361,8 @@ def get_real_obs_dict(agent_obs, shape_meta, sensor_config: dict):
     
     point_clouds = []
     for i in range(T):
-        pc = get_point_cloud(sensor_config, depth[i]) # (H, W, 3)
-        
+        # pass color frame so get_point_cloud can produce colored point clouds
+        pc = get_point_cloud(sensor_config, depth[i], rgb[i])
         point_clouds.append(pc)
         
     point_clouds = np.array(point_clouds) # (T, N, 3)
@@ -341,6 +371,110 @@ def get_real_obs_dict(agent_obs, shape_meta, sensor_config: dict):
         'point_cloud': point_clouds.astype(np.float32),
         'agent_pos': pose.astype(np.float32)
     }
+
+
+def visualize_pointcloud_and_target(obs_or_points, sensor_config, action, sphere_radius=0.02, frame_size=0.05, window_title="PointCloud Preview"):
+    """
+    Visualize an observed point cloud (or an observation dict) and a predicted target action position.
+
+    Args:
+        obs_or_points: Either an agent observation dict (as returned by Agent.get_observation())
+                       or a numpy array of points with shape (N,3) or (T,N,3).
+        sensor_config: YAML-loaded camera/sensor config (used if obs_or_points is an obs dict).
+        action: array-like action vector where first 3 elements are xyz.
+        sphere_radius: radius of the marker sphere (meters).
+        frame_size: size of coordinate frame at the target.
+        window_title: Title for the Open3D window.
+    """
+    # Resolve points
+    points = None
+    try:
+        if isinstance(obs_or_points, dict) and 'depth' in obs_or_points:
+            # Convert observation -> point cloud using existing helper
+            obs_dict = get_real_obs_dict(obs_or_points, None, sensor_config)
+            pc = obs_dict['point_cloud']
+            # pc shape could be (T, N, 3)
+            if isinstance(pc, np.ndarray) and pc.ndim == 3:
+                points = pc[-1]
+            # if points have color channels (N,6), drop to XYZ for visualization
+            if points is not None and points.ndim == 2 and points.shape[1] >= 6:
+                points = points[:, :3]
+            else:
+                points = pc
+        elif isinstance(obs_or_points, np.ndarray):
+            arr = obs_or_points
+            if arr.ndim == 3:
+                points = arr[-1]
+            elif arr.ndim == 2:
+                points = arr
+            else:
+                points = arr.reshape(-1, 3)
+        else:
+            # Unknown type: try to coerce
+            points = np.asarray(obs_or_points)
+            if points.ndim == 3:
+                points = points[-1]
+    except Exception:
+        points = None
+
+    if points is None or (isinstance(points, np.ndarray) and points.size == 0):
+        # use a single placeholder point at origin to avoid empty pcd issues
+        points = np.zeros((1, 3), dtype=np.float64)
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+    # If obs_or_points contains color channels, assign them to pcd.colors (expects 0..1 floats)
+    try:
+        # Case A: obs_or_points is a numpy array with color channels (N,6)
+        if isinstance(obs_or_points, np.ndarray) and obs_or_points.ndim == 2 and obs_or_points.shape[1] >= 6:
+            cols = obs_or_points[-1][:, 3:6]
+            # If cols in 0..255, scale down
+            if cols.max() > 1.1:
+                cols = (cols / 255.0).astype(np.float64)
+            pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+
+        # Case B: obs_or_points is an observation dict (has 'depth'/'rgb')
+        elif isinstance(obs_or_points, dict) and 'depth' in obs_or_points and 'rgb' in obs_or_points:
+            try:
+                obs_dict = get_real_obs_dict(obs_or_points, None, sensor_config)
+                pc_full = obs_dict.get('point_cloud', None)
+                if isinstance(pc_full, np.ndarray) and pc_full.ndim == 3:
+                    last_pc = pc_full[-1]
+                    if last_pc.ndim == 2 and last_pc.shape[1] >= 6:
+                        cols = last_pc[:, 3:6]
+                        if cols.max() > 1.1:
+                            cols = (cols / 255.0).astype(np.float64)
+                        pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+            except Exception:
+                # silently ignore color assignment errors and fall back to no colors
+                pass
+    except Exception:
+        pass
+
+    # action -> xyz
+    act = np.asarray(action)
+    if act.size >= 3:
+        xyz = act[:3].astype(np.float64)
+    else:
+        xyz = np.zeros(3, dtype=np.float64)
+
+    # Sphere marker and coordinate frame
+    sphere = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_radius)
+    sphere.compute_vertex_normals()
+    sphere.paint_uniform_color([1.0, 0.0, 0.0])
+    sphere.translate(xyz)
+
+    frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size, origin=xyz)
+
+    # Optionally add axes at origin for reference
+    origin_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size*2)
+
+    # Show
+    try:
+        o3d.visualization.draw_geometries([pcd, sphere, frame, origin_frame], window_name=window_title)
+    except Exception as e:
+        # In some headless environments Open3D visualization can fail; re-raise to let caller handle
+        raise e
 
 # -----------------------------------------------------------------------------
 # Main Loop
@@ -381,7 +515,7 @@ def run_single_episode(agent:DP3Agent, policy, cfg, device, max_duration, grippe
         result = policy.predict_action(obs_dict)
         del result
 
-    ensemble_buffer = EnsembleBuffer(mode="new")
+    ensemble_buffer = EnsembleBuffer(mode="avg")
     
     with torch.inference_mode():
         print("Start!")
@@ -404,6 +538,8 @@ def run_single_episode(agent:DP3Agent, policy, cfg, device, max_duration, grippe
                 ensemble_buffer.add_action(raw_action, t)
             
             step_action = ensemble_buffer.get_action()
+            # if t % 5 == 0:
+            #     visualize_pointcloud_and_target(obs, sensor_config, step_action)
             if step_action is None:
                 continue
                 
@@ -412,7 +548,7 @@ def run_single_episode(agent:DP3Agent, policy, cfg, device, max_duration, grippe
             agent.set_tcp_pose(step_action[:9])
             if gripper and len(step_action) > 9:
                 agent.set_tcp_gripper(step_action[9])
-
+            
             # Rate limiting to slow down execution
             if ctrl_interval is not None and ctrl_interval > 0:
                 time.sleep(ctrl_interval)
@@ -434,7 +570,7 @@ def run_single_episode(agent:DP3Agent, policy, cfg, device, max_duration, grippe
 @click.option('--max_duration', '-md', default=1000, help='Max duration in steps.')
 @click.option('--gripper', '-g', is_flag=True, default=False, type=bool, help='Enable gripper control')
 @click.option('--continuous', '-c', is_flag=True, default=False, type=bool, help='Enable continuous testing mode')
-@click.option('--ctrl_hz', default=10.0, type=float, help='Control frequency (Hz). Set 0 to disable rate limiting')
+@click.option('--ctrl_hz', default=5.0, type=float, help='Control frequency (Hz). Set 0 to disable rate limiting')
 @click.option('--config', required=True, type=str, help='Path to camera/sensor YAML config (required)')
 def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz, config):
     global interrupted
