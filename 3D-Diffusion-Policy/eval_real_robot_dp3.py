@@ -214,9 +214,10 @@ class DP3Agent:
         # self.arm.set_tcp_pose(target_pose)
         self.arm.move_ee(target_pose)
 
-    def set_tcp_gripper(self, width):
-        # self.arm.set_gripper_position(width)
-        self.arm.move_gripper(width)
+    def set_tcp_gripper(
+        self, gripper, blocking=False
+    ):
+        self.arm.move_gripper(gripper > 0.5)
 
 # -----------------------------------------------------------------------------
 # Point Cloud Generation
@@ -358,7 +359,7 @@ def _keyboard_signal_handler(key):
 keyboard_listener = keyboard.Listener(on_press=_keyboard_signal_handler)
 keyboard_listener.start()
 
-def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval, sensor_config: dict):
+def run_single_episode(agent:DP3Agent, policy, cfg, device, max_duration, gripper, output, ctrl_interval, sensor_config: dict):
     global interrupted
     global keyboard_listener
     
@@ -407,6 +408,7 @@ def run_single_episode(agent, policy, cfg, device, max_duration, gripper, output
                 continue
                 
             # Execute action: 9-dim (xyz + rot6d) or 10-dim (+gripper)
+            print(f"Step {t}: Executing action {step_action[-1]}")
             agent.set_tcp_pose(step_action[:9])
             if gripper and len(step_action) > 9:
                 agent.set_tcp_gripper(step_action[9])
