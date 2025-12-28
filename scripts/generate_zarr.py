@@ -131,8 +131,13 @@ def get_depth(path):
 
     return depth_16bit
 
+def get_mask(path):
+    mask_8bit = cv2.imread(path, cv2.IMREAD_GRAYSCALE)  # 读取为灰度图
+    mask_8bit = cv2.resize(mask_8bit, (WIDTH, HEIGHT), interpolation=cv2.INTER_NEAREST)
+    return mask_8bit
 
-def get_point_cloud(config, depth_map, color_map=None):
+
+def get_point_cloud(config, depth_map, color_map=None, mask_map=None):
     # Parse config
     width = config['camera']['width']
     height = config['camera']['height']
@@ -156,6 +161,10 @@ def get_point_cloud(config, depth_map, color_map=None):
     # 深度裁剪
     depth = depth_map.copy() / scale
     depth[depth > max_depth] = 0.0
+    # check if the mask_map is all zero
+    # print("Mask map unique values:", np.unique(mask_map) if mask_map is not None else "No mask map provided")
+    if mask_map is not None:
+        depth[mask_map == 0] = 0.0
     depth = depth.astype(np.float32)
 
     intrinsic = o3d.camera.PinholeCameraIntrinsic(
@@ -200,13 +209,13 @@ def get_point_cloud(config, depth_map, color_map=None):
         # open3d stores colors in 0-1 float
         colors = np.asarray(pcd.colors).astype(np.float32)
     
-    x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
-    mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
-           (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
-           (points[:, 2] > z_min) & (points[:, 2] < z_max)
-    points = points[mask]
-    if colors is not None:
-        colors = colors[mask]
+    # x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
+    # mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
+    #        (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
+    #        (points[:, 2] > z_min) & (points[:, 2] < z_max)
+    # points = points[mask]
+    # if colors is not None:
+    #     colors = colors[mask]
 
     pc = points
     if colors is not None:
@@ -341,6 +350,7 @@ def main():
             
             rgb_imgs = []
             depth_imgs = []
+            mask_imgs = []
             h5_datas = []
             
             for h5_file in h5_files:
@@ -366,6 +376,12 @@ def main():
                 rgb_path = entry_path / rgb_name
                 rgb_imgs.append(get_rgb(str(rgb_path)))
 
+                mask_name = f"{file_stem}_mask.png"
+                mask_path = entry_path / mask_name
+                if not mask_path.exists():
+                     cprint(f"Warning: Mask not found for {h5_file}", 'yellow')
+                mask_imgs.append(get_mask(str(mask_path)))
+
             # Ensure we have enough data
             if len(h5_datas) < 2:
                 cprint(f"Skipping {entry_path}: Not enough data ({len(h5_datas)} steps)", 'yellow')
@@ -377,7 +393,7 @@ def main():
             action_arrays_sub = [get_action(data) for data in h5_datas]
             total_count_sub = len(depth_imgs)
             # Build point clouds with colors when available
-            point_cloud_arrays_sub = [get_point_cloud(config, depth, rgb) for depth, rgb in zip(depth_imgs, rgb_imgs)]
+            point_cloud_arrays_sub = [get_point_cloud(config, depth, rgb, mask) for depth, rgb, mask in zip(depth_imgs, rgb_imgs, mask_imgs)]
 
             assert len(depth_imgs) == len(state_arrays_sub) == len(action_arrays_sub) == len(point_cloud_arrays_sub), \
                 f"Data length mismatch at {entry_path}: depth={len(depth_imgs)}, state={len(state_arrays_sub)}, action={len(action_arrays_sub)}, point_cloud={len(point_cloud_arrays_sub)}"
