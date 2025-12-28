@@ -1,7 +1,7 @@
 camera:
   width: 1280
   height: 720
-  max_depth: 2.0
+  max_depth: 4.0
   scale: 1000.0
   intrinsics:
     - [623.53829072, 0.0, 640.0]
