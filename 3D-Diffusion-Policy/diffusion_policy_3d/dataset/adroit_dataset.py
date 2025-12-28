@@ -4,6 +4,7 @@ import numpy as np
 import copy
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
+import zarr
 from diffusion_policy_3d.common.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
@@ -22,8 +23,19 @@ class AdroitDataset(BaseDataset):
             ):
         super().__init__()
         self.task_name = task_name
+        # Prefer to load img if available, but allow datasets without images (we store point_cloud-only zarrs)
+        try:
+            group = zarr.open(zarr_path, 'r')
+            available_keys = list(group['data'].keys()) if 'data' in group else []
+        except Exception:
+            available_keys = []
+
+        keys = ['state', 'action', 'point_cloud']
+        if 'img' in available_keys:
+            keys.append('img')
+
         self.replay_buffer = ReplayBuffer.copy_from_path(
-            zarr_path, keys=['state', 'action', 'point_cloud', 'img'])
+            zarr_path, keys=keys)
         val_mask = get_val_mask(
             n_episodes=self.replay_buffer.n_episodes, 
             val_ratio=val_ratio,
