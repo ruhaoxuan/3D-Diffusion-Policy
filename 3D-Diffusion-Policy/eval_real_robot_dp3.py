@@ -60,9 +60,10 @@ def clear_input_buffer():
     termios.tcflush(sys.stdin, termios.TCIFLUSH)
 
 class SimCameraRGBD:
-    def __init__(self, color_topic='/genesis/color_image', depth_topic='/genesis/depth_image'):
+    def __init__(self, color_topic='/genesis/color_image', depth_topic='/genesis/depth_image', mask_topic='/genesis/mask_image'):
         self.color_img = None
         self.depth_img = None
+        self.mask_img = None
         
         # Initialize node if not already initialized
         # try:
@@ -72,6 +73,7 @@ class SimCameraRGBD:
 
         rospy.Subscriber(color_topic, Image, self.color_callback)
         rospy.Subscriber(depth_topic, Image, self.depth_callback)
+        rospy.Subscriber(mask_topic, Image, self.mask_callback)
         
         # Wait for images
         cprint("Waiting for camera images...", "yellow")
@@ -111,9 +113,22 @@ class SimCameraRGBD:
         image_data = np.frombuffer(msg.data, dtype=dtype)
         img = image_data.reshape((height, width))
         self.depth_img = img.astype(np.float32) * scale
+    
+    def mask_callback(self, msg):
+        height = msg.height
+        width = msg.width
+        if msg.encoding == '32FC1':
+            dtype = np.uint8
+            scale = 1
+        else:
+            return
+        
+        image_data = np.frombuffer(msg.data, dtype=dtype)
+        img = image_data.reshape((height, width))
+        self.mask_img = img.astype(np.uint8) * scale
 
     def get_rgbd_image(self):
-        return self.color_img, self.depth_img
+        return self.color_img, self.depth_img, self.mask_img
 
 quat2rot6d_transformer = RotationTransformer(from_rep='quaternion', to_rep="rotation_6d")
 rot6d_quat_transformer = RotationTransformer(from_rep='rotation_6d', to_rep="quaternion")
@@ -134,6 +149,7 @@ class DP3Agent:
         
         self.rgb_buffer = deque(maxlen=obs_num)
         self.depth_buffer = deque(maxlen=obs_num)
+        self.mask_buffer = deque(maxlen=obs_num)
         self.pose_buffer = deque(maxlen=obs_num)
         
         
@@ -158,7 +174,7 @@ class DP3Agent:
         self._fill_initial_buffer()
 
     def _add_single_observation(self):
-        color, depth = self.camera.get_rgbd_image()
+        color, depth, mask = self.camera.get_rgbd_image()
         
         # Resize if needed (DP3 usually expects specific size, e.g. 84x84 or 128x128)
         # For now, keep original or resize to 84x84 as common in DP3
@@ -171,6 +187,11 @@ class DP3Agent:
         else:
             # Mock depth if missing
             depth = np.zeros(target_size, dtype=np.float32)
+        if mask is not None:
+            mask = cv2.resize(mask, target_size, interpolation=cv2.INTER_NEAREST)
+        else:
+            # Mock mask if missing
+            mask = np.zeros(target_size, dtype=np.uint8)
 
         arm_ee_pose = self.arm.get_tcp_position()
         transformed_ee_pose = transform_ee_pose_frame(arm_ee_pose, self.frame)
@@ -184,6 +205,7 @@ class DP3Agent:
 
         self.rgb_buffer.append(color)
         self.depth_buffer.append(depth)
+        self.mask_buffer.append(mask)
         self.pose_buffer.append(pose)
 
     def get_observation(self):
@@ -191,6 +213,7 @@ class DP3Agent:
         return {
             "rgb": np.array(self.rgb_buffer),
             "depth": np.array(self.depth_buffer),
+            "mask": np.array(self.mask_buffer),
             "pose": np.array(self.pose_buffer),
             "raw_img": self.rgb_buffer[-1] # For visualization
         }
@@ -259,7 +282,10 @@ def point_cloud_sampling(point_cloud:np.ndarray, num_points:int, method:str='fps
 
 
 
-def get_point_cloud(config, depth_map, color_map=None):
+def get_point_cloud(config, depth_map, color_map=None, mask_map=None):
+
+    # print(np.unique(mask_map))
+
     # Parse config
     width = config['camera']['width']
     height = config['camera']['height']
@@ -282,7 +308,11 @@ def get_point_cloud(config, depth_map, color_map=None):
 
     # 深度裁剪
     depth = depth_map.copy() / scale
-    depth[depth > max_depth] = 0.0
+    # depth[depth > max_depth] = 0.0
+    # check if the mask_map is all zero
+    # print("Mask map unique values:", np.unique(mask_map) if mask_map is not None else "No mask map provided")
+    if mask_map is not None:
+        depth[mask_map == 0] = 0.0
     depth = depth.astype(np.float32)
 
     intrinsic = o3d.camera.PinholeCameraIntrinsic(
@@ -327,13 +357,13 @@ def get_point_cloud(config, depth_map, color_map=None):
         # open3d stores colors in 0-1 float
         colors = np.asarray(pcd.colors).astype(np.float32)
     
-    x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
-    mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
-           (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
-           (points[:, 2] > z_min) & (points[:, 2] < z_max)
-    points = points[mask]
-    if colors is not None:
-        colors = colors[mask]
+    # x_min, x_max, y_min, y_max, z_min, z_max = crop_bounds
+    # mask = (points[:, 0] > x_min) & (points[:, 0] < x_max) & \
+    #        (points[:, 1] > y_min) & (points[:, 1] < y_max) & \
+    #        (points[:, 2] > z_min) & (points[:, 2] < z_max)
+    # points = points[mask]
+    # if colors is not None:
+    #     colors = colors[mask]
 
     pc = points
     if colors is not None:
@@ -348,13 +378,13 @@ def get_point_cloud(config, depth_map, color_map=None):
 
     return pc
 
-
 def get_real_obs_dict(agent_obs, shape_meta, sensor_config: dict):
     # agent_obs: {'rgb': (T, H, W, 3), 'depth': (T, H, W), 'pose': (T, D)}
     # Output: {'point_cloud': (T, N, 3 or 6), 'agent_pos': (T, D)}
     
     rgb = agent_obs['rgb']
     depth = agent_obs['depth']
+    mask = agent_obs['mask']
     pose = agent_obs['pose']
     
     T, H, W, _ = rgb.shape
@@ -362,7 +392,7 @@ def get_real_obs_dict(agent_obs, shape_meta, sensor_config: dict):
     point_clouds = []
     for i in range(T):
         # pass color frame so get_point_cloud can produce colored point clouds
-        pc = get_point_cloud(sensor_config, depth[i], rgb[i])
+        pc = get_point_cloud(sensor_config, depth[i], rgb[i], mask[i])
         point_clouds.append(pc)
         
     point_clouds = np.array(point_clouds) # (T, N, 3)

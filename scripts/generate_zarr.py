@@ -160,7 +160,7 @@ def get_point_cloud(config, depth_map, color_map=None, mask_map=None):
 
     # 深度裁剪
     depth = depth_map.copy() / scale
-    depth[depth > max_depth] = 0.0
+    # depth[depth > max_depth] = 0.0
     # check if the mask_map is all zero
     # print("Mask map unique values:", np.unique(mask_map) if mask_map is not None else "No mask map provided")
     if mask_map is not None:
@@ -337,6 +337,9 @@ def main():
             
             # 1. Find all h5 files
             h5_files = [f for f in os.listdir(entry_path) if f.endswith('.h5')]
+
+            # read_hdf5_example(entry_path / h5_files[0])
+            # return
             
             # 2. Sort and filter by sample_step
             # Assuming filenames are numbers like "0.h5", "1.h5"
