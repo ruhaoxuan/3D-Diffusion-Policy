@@ -231,11 +231,11 @@ def get_point_cloud(config, depth_map, color_map=None, mask_map=None):
     return pc
 
 def get_state(data):
-    pose = np.array(data['ee_states'])
-    xyz = pose[:3]
-    quat = pose[3:7]
-    rot6d = quat_to_rot6d(np.array(quat))
-    base_state = np.concatenate((xyz, rot6d))
+    pose = np.array(data['joint_states'])
+    # xyz = pose[:3]
+    # quat = pose[3:7]
+    # rot6d = quat_to_rot6d(np.array(quat))
+    base_state = pose[:-2]
     if 'gripper_control' in data and data['gripper_control'] is not None:
         gripper = np.array(data['gripper_control']).reshape(-1)
         base_state = np.concatenate((base_state, gripper))
@@ -243,11 +243,11 @@ def get_state(data):
 
 def get_action(data):
     # use ee_control for action and keep gripper control consistent
-    pose = np.array(data['ee_control']) if 'ee_control' in data else np.array(data['ee_states'])
-    xyz = pose[:3]
-    quat = pose[3:7]
-    rot6d = quat_to_rot6d(np.array(quat))
-    base_action = np.concatenate((xyz, rot6d))
+    pose = np.array(data['joint_control']) if 'joint_control' in data else np.array(data['joint_states'])
+    # xyz = pose[:3]
+    # quat = pose[3:7]
+    # rot6d = quat_to_rot6d(np.array(quat))
+    base_action = pose
     if 'gripper_control' in data and data['gripper_control'] is not None:
         gripper = np.array(data['gripper_control']).reshape(-1)
         base_action = np.concatenate((base_action, gripper))

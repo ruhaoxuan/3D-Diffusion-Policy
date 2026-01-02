@@ -220,9 +220,9 @@ class DP3Agent:
     
     def set_tcp_pose(self, pose):
         # pose: 9-dim (xyz + rot6d)
-        xyz = pose[:3]
-        rot6d = pose[3:9]
-        quat = rot6d_quat_transformer.forward(rot6d)
+        # xyz = pose[:3]
+        # rot6d = pose[3:9]
+        # quat = rot6d_quat_transformer.forward(rot6d)
         
         # Transform back if needed? Assuming input is in 'frame'
         # If frame is camera, we need to transform back to base for robot control
@@ -233,9 +233,11 @@ class DP3Agent:
         # If the model was trained with camera frame observations, it likely outputs camera frame actions.
         # But here we just pass it to arm.
         
-        target_pose = np.concatenate([xyz, quat])
+        # target_pose = np.concatenate([xyz, quat])
         # self.arm.set_tcp_pose(target_pose)
-        self.arm.move_ee(target_pose)
+        # self.arm.move_ee(target_pose)
+        target_pose = pose
+        self.arm.move_joint(target_pose)
 
     def set_tcp_gripper(
         self, gripper, blocking=False
@@ -575,9 +577,9 @@ def run_single_episode(agent:DP3Agent, policy, cfg, device, max_duration, grippe
                 
             # Execute action: 9-dim (xyz + rot6d) or 10-dim (+gripper)
             print(f"Step {t}: Executing action {step_action[-1]}")
-            agent.set_tcp_pose(step_action[:9])
-            if gripper and len(step_action) > 9:
-                agent.set_tcp_gripper(step_action[9])
+            agent.set_tcp_pose(step_action[:10])
+            if gripper and len(step_action) > 10:
+                agent.set_tcp_gripper(step_action[10])
             
             # Rate limiting to slow down execution
             if ctrl_interval is not None and ctrl_interval > 0:
