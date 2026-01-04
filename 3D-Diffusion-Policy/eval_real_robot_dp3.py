@@ -193,11 +193,14 @@ class DP3Agent:
             # Mock mask if missing
             mask = np.zeros(target_size, dtype=np.uint8)
 
-        arm_ee_pose = self.arm.get_tcp_position()
-        transformed_ee_pose = transform_ee_pose_frame(arm_ee_pose, self.frame)
-        xyz, quat = transformed_ee_pose[:3], transformed_ee_pose[3:7]
-        rot6d = quat2rot6d_transformer.forward(np.array(quat))
-        pose = np.concatenate([xyz, rot6d])
+        # arm_ee_pose = self.arm.get_tcp_position()
+        # transformed_ee_pose = transform_ee_pose_frame(arm_ee_pose, self.frame)
+        # xyz, quat = transformed_ee_pose[:3], transformed_ee_pose[3:7]
+        # rot6d = quat2rot6d_transformer.forward(np.array(quat))
+        # pose = np.concatenate([xyz, rot6d])
+        arm_joint_pos = self.arm.get_arm_position()
+        pose = np.array(arm_joint_pos[:-2])
+        # print(pose.shape)
         
         if self.gripper:
             gripper_width = self.arm.get_gripper_position()
@@ -635,11 +638,11 @@ def main(ckpt, output, max_duration, gripper, continuous, ctrl_hz, config):
         agent_pos_shape = cfg.task.shape_meta.obs.agent_pos.shape
         state_dim = agent_pos_shape[0]
     except:
-        state_dim = 9 # Default fallback
+        state_dim = 10 # Default fallback
 
-    if state_dim == 9:
+    if state_dim == 10:
         model_has_gripper = False
-    elif state_dim == 10:
+    elif state_dim == 11:
         model_has_gripper = True
     else:
         raise ValueError(f"Unsupported state_dim {state_dim} for rot6d-only setup. Expected 9 or 10.")
